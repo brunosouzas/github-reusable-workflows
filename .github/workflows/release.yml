@@ -1,0 +1,15 @@
+name: Release
+
+# This repository's own releases (delivery model 2): the release pull request, then the vX.Y.Z tag
+# callers pin. It calls its own reusable workflow from the same commit.
+on:
+  push:
+    branches: [main]
+
+permissions: {}
+
+jobs:
+  release-please:
+    uses: ./.github/workflows/release-please.yml
+    secrets:
+      release-app-private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}

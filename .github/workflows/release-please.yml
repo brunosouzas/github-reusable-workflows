@@ -1,0 +1,88 @@
+name: release-please
+
+# Reusable workflow: release-please in manifest mode for the caller's repository (delivery model 2 of
+# Bruno's engineering playbook: a release pull request; merging it makes the vX.Y.Z tag and the GitHub
+# release). It runs as the GitHub App brunosouzas-release, not GITHUB_TOKEN, for two reasons:
+# - a pull request opened with GITHUB_TOKEN starts no workflow, so the release pull request would
+#   never get its required checks;
+# - the v* tag ruleset lets only that app create tags.
+# The app token is limited to the caller's repository and to contents, pull requests and issues
+# (labels). Call it on a push to main only.
+#
+# Caller:
+#   on:
+#     push:
+#       branches: [main]
+#   permissions: {}
+#   jobs:
+#     release-please:
+#       uses: brunosouzas/github-reusable-workflows/.github/workflows/release-please.yml@vX.Y.Z
+#       secrets:
+#         release-app-private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+#
+# Needs in the caller: release-please-config.json and .release-please-manifest.json; the app installed
+# on the repository; the secret RELEASE_APP_PRIVATE_KEY (the app's private key, PEM); the app as the
+# bypass of the repository's v* tag ruleset.
+#
+# Actions are pinned by commit SHA, with the tag in a comment.
+
+on:
+  workflow_call:
+    inputs:
+      app-id:
+        description: The GitHub App that acts (brunosouzas-release)
+        type: string
+        default: "5576835"
+      skip-github-release:
+        description: Open the release pull request only; something else creates the tag and the release
+        type: boolean
+        default: false
+    secrets:
+      release-app-private-key:
+        description: The app's private key (PEM)
+        required: true
+    outputs:
+      releases_created:
+        description: "\"true\" when this run created a release"
+        value: ${{ jobs.release-please.outputs.releases_created }}
+      tag_name:
+        description: The tag of the release this run created
+        value: ${{ jobs.release-please.outputs.tag_name }}
+      pr:
+        description: The release pull request this run opened or updated (JSON)
+        value: ${{ jobs.release-please.outputs.pr }}
+
+permissions: {}
+
+jobs:
+  release-please:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions: {}
+    concurrency:
+      group: release-please-${{ github.repository }}
+      cancel-in-progress: false
+    outputs:
+      releases_created: ${{ steps.release.outputs.releases_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+      pr: ${{ steps.release.outputs.pr }}
+    steps:
+      - name: App token for this repository only
+        id: app
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          app-id: ${{ inputs.app-id }}
+          private-key: ${{ secrets.release-app-private-key }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+          permission-pull-requests: write
+          permission-issues: write
+      - name: release-please
+        id: release
+        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        with:
+          token: ${{ steps.app.outputs.token }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+          skip-github-release: ${{ inputs.skip-github-release }}
