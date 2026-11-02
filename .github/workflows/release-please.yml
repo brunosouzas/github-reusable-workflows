@@ -78,6 +78,30 @@ jobs:
           permission-contents: write
           permission-pull-requests: write
           permission-issues: write
+      # With skip-github-release, the caller's own release workflow makes the tag, so release-please
+      # never labels the merged release pull request "autorelease: tagged"; it stays "pending" and
+      # every later run stops at "untagged, merged release PRs outstanding". Mark the ones whose
+      # v<version> tag exists. A run on the merge itself may come before the tag: the next push fixes it.
+      - name: Mark released pull requests as tagged (skip-github-release)
+        if: inputs.skip-github-release
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh label create "autorelease: tagged" -R "$REPO" --color ededed --force >/dev/null
+          gh pr list -R "$REPO" --state merged --label "autorelease: pending" --limit 20 \
+            --json number,title --jq '.[] | "\(.number)\t\(.title)"' |
+            while IFS=$'\t' read -r number title; do
+              version=$(printf '%s\n' "$title" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | tail -n 1 || true)
+              [ -n "$version" ] || continue
+              if gh api "repos/$REPO/git/ref/tags/v$version" >/dev/null 2>&1; then
+                gh pr edit "$number" -R "$REPO" --remove-label "autorelease: pending" --add-label "autorelease: tagged"
+                echo "#$number: v$version exists, marked tagged"
+              else
+                echo "#$number: v$version not tagged yet"
+              fi
+            done
       - name: release-please
         id: release
         uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
