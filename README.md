@@ -4,7 +4,7 @@ Reusable GitHub Actions workflows for Bruno's open source repositories, pinned b
 
 | Workflow | What it does | Inputs | Secrets |
 |---|---|---|---|
-| `.github/workflows/release-please.yml` | Delivery model 2: release-please in manifest mode keeps the release pull request; merging it makes the `vX.Y.Z` tag and the GitHub release. Runs as the GitHub App `brunosouzas-release` (a pull request opened with `GITHUB_TOKEN` starts no checks, and the `v*` tag ruleset lets only the app create tags), with a token limited to the caller's repository | `app-id` (`5576835`), `skip-github-release` (`false`; `true` when the caller's own release workflow creates the tag, as the npm packages do) | `release-app-private-key` |
+| `.github/workflows/release-please.yml` | Delivery model 2: release-please in manifest mode keeps the release pull request; merging it makes the `vX.Y.Z` tag and the GitHub release. Runs as the GitHub App `brunosouzas-release` (a pull request opened with `GITHUB_TOKEN` starts no checks; when release-please makes the tag, the `v*` tag ruleset lets only the app create it), with a token limited to the caller's repository | `app-id` (`5576835`), `skip-github-release` (`false`; `true` when the caller's own release workflow creates the tag, as the npm packages do) | `release-app-private-key` |
 
 ## Use
 
@@ -21,7 +21,9 @@ jobs:
       release-app-private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
 ```
 
-The caller needs `release-please-config.json` and `.release-please-manifest.json`, the app installed on the repository, the secret `RELEASE_APP_PRIVATE_KEY` (the app's private key, PEM; Bruno sets it), and the app as the bypass of its `v*` tag ruleset (`scripts/repo-protection.py --model <repo> --check <check> --bypass-app 5576835 --apply` in the ai-engineering-kit). Pull request titles are Conventional Commits: release-please releases only `feat` and `fix`.
+The caller needs `release-please-config.json` and `.release-please-manifest.json`, the app installed on the repository, the secret `RELEASE_APP_PRIVATE_KEY` (the app's private key, PEM; Bruno sets it), and, when release-please makes the tag, the app as the bypass of its `v*` tag ruleset (`scripts/repo-protection.py --model <repo> --check <check> --bypass-app 5576835 --apply` in the ai-engineering-kit). Commit messages and pull request titles are Conventional Commits: release-please reads the commit messages that reach `main` (with a squash merge, the squash commit's message) and releases `feat`, `fix`, `perf` and `revert`; other types release nothing.
+
+After a release that never got its tag (the caller's release workflow rejected or failed), release-please opens no new release pull request until the tag `v<version>` exists: push the tag by hand to release that version; the next push to `main` marks the release pull request tagged.
 
 ## Releases
 

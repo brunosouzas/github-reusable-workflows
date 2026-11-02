@@ -5,7 +5,8 @@ name: release-please
 # release). It runs as the GitHub App brunosouzas-release, not GITHUB_TOKEN, for two reasons:
 # - a pull request opened with GITHUB_TOKEN starts no workflow, so the release pull request would
 #   never get its required checks;
-# - the v* tag ruleset lets only that app create tags.
+# - when release-please makes the tag (skip-github-release false), the v* tag ruleset lets only that
+#   app create it; with skip-github-release the caller's own release workflow makes the tag.
 # The app token is limited to the caller's repository and to contents, pull requests and issues
 # (labels). Call it on a push to main only.
 #
@@ -22,7 +23,7 @@ name: release-please
 #
 # Needs in the caller: release-please-config.json and .release-please-manifest.json; the app installed
 # on the repository; the secret RELEASE_APP_PRIVATE_KEY (the app's private key, PEM); the app as the
-# bypass of the repository's v* tag ruleset.
+# bypass of the repository's v* tag ruleset when release-please makes the tag.
 #
 # Actions are pinned by commit SHA, with the tag in a comment.
 
@@ -93,10 +94,12 @@ jobs:
           gh pr list -R "$REPO" --state merged --label "autorelease: pending" --limit 20 \
             --json number,title --jq '.[] | "\(.number)\t\(.title)"' |
             while IFS=$'\t' read -r number title; do
-              version=$(printf '%s\n' "$title" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | tail -n 1 || true)
+              version=$(printf '%s\n' "$title" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?(\+[0-9A-Za-z.-]+)?' | tail -n 1 || true)
               [ -n "$version" ] || continue
               if gh api "repos/$REPO/git/ref/tags/v$version" >/dev/null 2>&1; then
-                gh pr edit "$number" -R "$REPO" --remove-label "autorelease: pending" --add-label "autorelease: tagged"
+                # REST, not gh pr edit (GraphQL), which can fail with a narrowly scoped app token.
+                gh api -X DELETE "repos/$REPO/issues/$number/labels/autorelease:%20pending" >/dev/null
+                gh api "repos/$REPO/issues/$number/labels" -f "labels[]=autorelease: tagged" >/dev/null
                 echo "#$number: v$version exists, marked tagged"
               else
                 echo "#$number: v$version not tagged yet"
