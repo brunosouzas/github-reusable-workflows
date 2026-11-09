@@ -2,7 +2,7 @@ name: Release
 
 # This repository's own releases (delivery model 2): the release pull request, then the vX.Y.Z tag
 # callers pin. It calls its own reusable workflow from the same commit, as this repository's release app
-# github-reusable-workflows-release (environment release-please: RELEASE_APP_CLIENT_ID, RELEASE_APP_PRIVATE_KEY).
+# brunosouzas-gh-workflows-release (environment release-please: RELEASE_APP_CLIENT_ID, RELEASE_APP_PRIVATE_KEY).
 on:
   push:
     branches: [main]

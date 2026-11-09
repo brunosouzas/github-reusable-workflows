@@ -38,7 +38,7 @@ jobs:
 The caller of `release-please.yml` needs:
 
 - `release-please-config.json` and `.release-please-manifest.json`;
-- its own release GitHub App (Contents, Pull requests and Issues read and write, no webhook), installed on that repository alone;
+- its own release GitHub App (Contents, Pull requests and Issues read and write, no webhook), installed on that repository alone, named `brunosouzas-<repository>-release`, with a short name for the repository when the whole name passes GitHub's 34-character limit (this repository's app is `brunosouzas-gh-workflows-release`);
 - the environment `release-please`, with deployment branches limited to `main` and no reviewer, holding the variable `RELEASE_APP_CLIENT_ID` (the app's Client ID) and the secret `RELEASE_APP_PRIVATE_KEY` (its private key, PEM; Bruno sets it). The reusable job declares the environment, so both resolve to its values: it reads the variable directly, and the caller passes the secret by name (`secrets: RELEASE_APP_PRIVATE_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}`), which GitHub resolves from that environment even though the secret exists only there. Not passed, it is empty and the job stops at its first step;
 - when release-please makes the tag, the app as a bypass of its `v*` tag ruleset (creations restricted to the app and the admin).
 
@@ -48,4 +48,4 @@ After a release that never got its tag (the caller's release workflow rejected o
 
 ## Releases
 
-This repository is in delivery model 2 itself: `release.yml` calls the workflow above on every push to `main`, as its own app `github-reusable-workflows-release`, and `title.yml` checks its pull request titles; Bruno merges the release pull request. Change a workflow in a pull request, then pin a consumer to the new tag in its own pull request.
+This repository is in delivery model 2 itself: `release.yml` calls the workflow above on every push to `main`, as its own app `brunosouzas-gh-workflows-release`, and `title.yml` checks its pull request titles; Bruno merges the release pull request. Change a workflow in a pull request, then pin a consumer to the new tag in its own pull request.
