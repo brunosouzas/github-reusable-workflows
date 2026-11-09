@@ -12,3 +12,5 @@ permissions: {}
 jobs:
   release-please:
     uses: ./.github/workflows/release-please.yml
+    secrets:
+      RELEASE_APP_PRIVATE_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}

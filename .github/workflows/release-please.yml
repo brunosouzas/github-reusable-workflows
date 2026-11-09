@@ -19,13 +19,18 @@ name: release-please
 #   jobs:
 #     release-please:
 #       uses: brunosouzas/github-reusable-workflows/.github/workflows/release-please.yml@vX.Y.Z
+#       secrets:
+#         RELEASE_APP_PRIVATE_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
 #
 # Needs in the caller: release-please-config.json and .release-please-manifest.json; its release app
 # installed on the repository; the environment `release-please` (deployment branch main only, no
 # reviewer) with the variable RELEASE_APP_CLIENT_ID and the secret RELEASE_APP_PRIVATE_KEY (the app's
-# private key, PEM). The job declares that environment and reads both from it: a caller cannot pass an
-# environment's values through with: or secrets:, and only a run on main can read the key. The app is
-# the bypass of the repository's v* tag ruleset when release-please makes the tag.
+# private key, PEM). The job declares that environment, so both resolve to the environment's values and
+# only a run on main can read the key: the variable is read here directly, and the caller still passes
+# the secret by name (GitHub resolves a secret a caller passes by name from the environment of the job
+# that uses it, even when it exists only there; a secret not passed is an empty string, so the first
+# step stops on it). The app is the bypass of the repository's v* tag ruleset when release-please
+# makes the tag.
 #
 # Actions are pinned by commit SHA, with the tag in a comment.
 
@@ -40,6 +45,10 @@ on:
         description: Open the release pull request only; something else creates the tag and the release
         type: boolean
         default: false
+    secrets:
+      RELEASE_APP_PRIVATE_KEY:
+        description: Pass it by name; it resolves from the environment (the app's private key, PEM)
+        required: true
     outputs:
       releases_created:
         description: "\"true\" when this run created a release"
@@ -68,6 +77,13 @@ jobs:
       tag_name: ${{ steps.release.outputs.tag_name }}
       pr: ${{ steps.release.outputs.pr }}
     steps:
+      - name: The environment holds the app's Client ID and key
+        env:
+          CLIENT_ID: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          KEY_SET: ${{ secrets.RELEASE_APP_PRIVATE_KEY != '' }}
+        run: |
+          [ -n "$CLIENT_ID" ] || { echo "::error::RELEASE_APP_CLIENT_ID is empty: set it in the environment ${{ inputs.environment }}"; exit 1; }
+          [ "$KEY_SET" = true ] || { echo "::error::RELEASE_APP_PRIVATE_KEY is empty: set it in the environment ${{ inputs.environment }} and pass it by name from the caller"; exit 1; }
       - name: App token for this repository only
         id: app
         uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
@@ -96,7 +112,7 @@ jobs:
               version=$(printf '%s\n' "$title" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?(\+[0-9A-Za-z.-]+)?' | tail -n 1 || true)
               [ -n "$version" ] || continue
               if gh api "repos/$REPO/git/ref/tags/v$version" >/dev/null 2>&1; then
-                # REST, not gh pr edit (GraphQL), which can fail with a narrowly scoped app token.
+                # Labels through REST: gh pr edit (GraphQL) can fail with a narrowly scoped app token.
                 gh api -X DELETE "repos/$REPO/issues/$number/labels/autorelease:%20pending" >/dev/null
                 gh api "repos/$REPO/issues/$number/labels" -f "labels[]=autorelease: tagged" >/dev/null
                 echo "#$number: v$version exists, marked tagged"

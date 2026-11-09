@@ -1,6 +1,6 @@
 # github-reusable-workflows
 
-Reusable GitHub Actions workflows for Bruno's open source repositories, pinned by tag (`@vX.Y.Z`). The private repositories use the Azure DevOps equivalent, `azure-devops-reusable-templates`.
+Reusable GitHub Actions workflows for Bruno's open source repositories, pinned by tag (`@vX.Y.Z`). The private repositories use an Azure DevOps equivalent.
 
 | Workflow | What it does | Inputs | Secrets |
 |---|---|---|---|
@@ -20,6 +20,8 @@ jobs:
     uses: brunosouzas/github-reusable-workflows/.github/workflows/release-please.yml@v0.1.0
     with:
       skip-github-release: true   # only when the repository's own release workflow makes the tag
+    secrets:
+      RELEASE_APP_PRIVATE_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
 ```
 
 ```yaml
@@ -37,10 +39,10 @@ The caller of `release-please.yml` needs:
 
 - `release-please-config.json` and `.release-please-manifest.json`;
 - its own release GitHub App (Contents, Pull requests and Issues read and write, no webhook), installed on that repository alone;
-- the environment `release-please`, with deployment branches limited to `main` and no reviewer, holding the variable `RELEASE_APP_CLIENT_ID` (the app's Client ID) and the secret `RELEASE_APP_PRIVATE_KEY` (its private key, PEM; Bruno sets it). The reusable job declares the environment and reads both itself: GitHub does not let a caller pass an environment's values through `with:` or `secrets:`;
-- when release-please makes the tag, the app as the bypass of its `v*` tag ruleset (`scripts/repo-protection.py --model <repo> --check <check> --bypass-app <app id> --apply` in the ai-engineering-kit).
+- the environment `release-please`, with deployment branches limited to `main` and no reviewer, holding the variable `RELEASE_APP_CLIENT_ID` (the app's Client ID) and the secret `RELEASE_APP_PRIVATE_KEY` (its private key, PEM; Bruno sets it). The reusable job declares the environment, so both resolve to its values: it reads the variable directly, and the caller passes the secret by name (`secrets: RELEASE_APP_PRIVATE_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}`), which GitHub resolves from that environment even though the secret exists only there. Not passed, it is empty and the job stops at its first step;
+- when release-please makes the tag, the app as a bypass of its `v*` tag ruleset (creations restricted to the app and the admin).
 
-The caller of `pr-title.yml` sets the squash merge's default commit message to the pull request title (`gh api -X PATCH repos/<owner>/<repo> -f squash_merge_commit_title=PR_TITLE -f squash_merge_commit_message=PR_BODY`) and makes `pr-title / conventional-commit` a required check. Commit messages and pull request titles are Conventional Commits: release-please reads the commits that reach `main` and releases `feat`, `fix`, `perf` and `revert`; other types release nothing (a `Release-As: x.y.z` line in a commit body forces a version).
+The caller of `pr-title.yml` sets the squash merge's default commit message to the pull request title (`gh api -X PATCH repos/<owner>/<repo> -f squash_merge_commit_title=PR_TITLE -f squash_merge_commit_message=PR_BODY`) and makes `pr-title / conventional-commit` a required check (the name holds when the caller's job id is `pr-title`). The scope is lowercase; GitHub's default revert title (`Revert "..."`) fails: retitle it `revert: <description>`. Commit messages and pull request titles are Conventional Commits: release-please reads the commits that reach `main` and releases `feat`, `fix`, `perf` and `revert`; other types release nothing (a `Release-As: x.y.z` line in a commit body forces a version).
 
 After a release that never got its tag (the caller's release workflow rejected or failed), release-please opens no new release pull request until the tag `v<version>` exists: push the tag by hand to release that version; the next push to `main` marks the release pull request tagged.
 
