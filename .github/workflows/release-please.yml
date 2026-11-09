@@ -28,8 +28,8 @@ name: release-please
 # private key, PEM). The job declares that environment, so both resolve to the environment's values and
 # only a run on main can read the key: the variable is read here directly, and the caller still passes
 # the secret by name (GitHub resolves a secret a caller passes by name from the environment of the job
-# that uses it, even when it exists only there; a secret not passed is an empty string, so the first
-# step stops on it). The app is the bypass of the repository's v* tag ruleset when release-please
+# that uses it, even when it exists only there). The secret is declared optional on purpose: whether
+# it is not passed or resolves empty, the first step stops with an error that names it. The app is the bypass of the repository's v* tag ruleset when release-please
 # makes the tag.
 #
 # Actions are pinned by commit SHA, with the tag in a comment.
@@ -48,7 +48,7 @@ on:
     secrets:
       RELEASE_APP_PRIVATE_KEY:
         description: Pass it by name; it resolves from the environment (the app's private key, PEM)
-        required: true
+        required: false
     outputs:
       releases_created:
         description: "\"true\" when this run created a release"
@@ -81,9 +81,10 @@ jobs:
         env:
           CLIENT_ID: ${{ vars.RELEASE_APP_CLIENT_ID }}
           KEY_SET: ${{ secrets.RELEASE_APP_PRIVATE_KEY != '' }}
+          ENV_NAME: ${{ inputs.environment }}
         run: |
-          [ -n "$CLIENT_ID" ] || { echo "::error::RELEASE_APP_CLIENT_ID is empty: set it in the environment ${{ inputs.environment }}"; exit 1; }
-          [ "$KEY_SET" = true ] || { echo "::error::RELEASE_APP_PRIVATE_KEY is empty: set it in the environment ${{ inputs.environment }} and pass it by name from the caller"; exit 1; }
+          [ -n "$CLIENT_ID" ] || { echo "::error::RELEASE_APP_CLIENT_ID is empty: set it in the environment $ENV_NAME"; exit 1; }
+          [ "$KEY_SET" = true ] || { echo "::error::RELEASE_APP_PRIVATE_KEY is empty: set it in the environment $ENV_NAME and pass it by name from the caller"; exit 1; }
       - name: App token for this repository only
         id: app
         uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0

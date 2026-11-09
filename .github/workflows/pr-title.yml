@@ -8,8 +8,8 @@ name: pr-title
 # Accepted: <type>[(<scope>)][!]: <description>, with type one of feat, fix, perf, revert, refactor,
 # docs, test, ci, build, chore, style; the scope is lowercase. release-please's own pull requests
 # (chore(main): release x.y.z) pass as they are; GitHub's default revert title (Revert "...") does not:
-# retitle it revert: <description>. A title with a line break fails. No third-party action: the title goes to the script through the environment, never
-# into the script's text.
+# retitle it revert: <description>. A title with a line break fails. No third-party action: the title
+# goes to the script through the environment, never into the script's text.
 #
 # Caller:
 #   on:
