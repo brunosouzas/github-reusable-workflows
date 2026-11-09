@@ -1,0 +1,49 @@
+name: pr-title
+
+# Reusable workflow: checks that a pull request's title is a Conventional Commit, because with a squash
+# merge the title becomes the commit on main that release-please reads (delivery model 2 and 3 of
+# Bruno's engineering playbook). The caller's repository sets "Default commit message" for squash
+# merges to the pull request title, and marks this check as required in its model ruleset.
+#
+# Accepted: <type>[(<scope>)][!]: <description>, with type one of feat, fix, perf, revert, refactor,
+# docs, test, ci, build, chore, style; the scope is lowercase. release-please's own pull requests
+# (chore(main): release x.y.z) pass as they are; GitHub's default revert title (Revert "...") does not:
+# retitle it revert: <description>. A title with a line break fails. No third-party action: the title
+# goes to the script through the environment, never into the script's text.
+#
+# Caller:
+#   on:
+#     pull_request:
+#       types: [opened, edited, synchronize, reopened]
+#   permissions: {}
+#   jobs:
+#     pr-title:
+#       uses: brunosouzas/github-reusable-workflows/.github/workflows/pr-title.yml@vX.Y.Z
+# The required check is then named "pr-title / conventional-commit" (the caller's job id, then this job's).
+
+on:
+  workflow_call: {}
+
+permissions: {}
+
+jobs:
+  conventional-commit:
+    if: github.event_name == 'pull_request' || github.event_name == 'pull_request_target'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: The title is a Conventional Commit
+        env:
+          TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          set -euo pipefail
+          types='feat|fix|perf|revert|refactor|docs|test|ci|build|chore|style'
+          case "$TITLE" in *$'\n'*|*$'\r'*) echo "::error title=Pull request title::the title has a line break"; exit 1;; esac
+          shown=${TITLE//%/%25}
+          if printf '%s\n' "$TITLE" | grep -qE "^(${types})(\([a-z0-9][a-z0-9._/-]*\))?!?: [^ ].*$"; then
+            echo "ok: $TITLE"
+          else
+            echo "::error title=Pull request title::\"$shown\" is not a Conventional Commit. Use <type>[(<scope>)][!]: <description>, with type one of ${types//|/, } (https://www.conventionalcommits.org/). The squash merge makes the title the commit release-please reads."
+            exit 1
+          fi
