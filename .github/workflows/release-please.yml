@@ -2,7 +2,8 @@ name: release-please
 
 # Reusable workflow: release-please in manifest mode for the caller's repository (delivery model 2 of
 # Bruno's engineering playbook: a release pull request; merging it makes the vX.Y.Z tag and the GitHub
-# release). It runs as the GitHub App brunosouzas-release, not GITHUB_TOKEN, for two reasons:
+# release). It runs as the caller's own release GitHub App (one app per repository, installed on that
+# repository alone), not GITHUB_TOKEN, for two reasons:
 # - a pull request opened with GITHUB_TOKEN starts no workflow, so the release pull request would
 #   never get its required checks;
 # - when release-please makes the tag (skip-github-release false), the v* tag ruleset lets only that
@@ -18,30 +19,27 @@ name: release-please
 #   jobs:
 #     release-please:
 #       uses: brunosouzas/github-reusable-workflows/.github/workflows/release-please.yml@vX.Y.Z
-#       secrets:
-#         release-app-private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
 #
-# Needs in the caller: release-please-config.json and .release-please-manifest.json; the app installed
-# on the repository; the secret RELEASE_APP_PRIVATE_KEY (the app's private key, PEM); the app as the
-# bypass of the repository's v* tag ruleset when release-please makes the tag.
+# Needs in the caller: release-please-config.json and .release-please-manifest.json; its release app
+# installed on the repository; the environment `release-please` (deployment branch main only, no
+# reviewer) with the variable RELEASE_APP_CLIENT_ID and the secret RELEASE_APP_PRIVATE_KEY (the app's
+# private key, PEM). The job declares that environment and reads both from it: a caller cannot pass an
+# environment's values through with: or secrets:, and only a run on main can read the key. The app is
+# the bypass of the repository's v* tag ruleset when release-please makes the tag.
 #
 # Actions are pinned by commit SHA, with the tag in a comment.
 
 on:
   workflow_call:
     inputs:
-      app-id:
-        description: The GitHub App that acts (brunosouzas-release)
+      environment:
+        description: The caller's environment that holds the app's key (deployment branch main only)
         type: string
-        default: "5576835"
+        default: release-please
       skip-github-release:
         description: Open the release pull request only; something else creates the tag and the release
         type: boolean
         default: false
-    secrets:
-      release-app-private-key:
-        description: The app's private key (PEM)
-        required: true
     outputs:
       releases_created:
         description: "\"true\" when this run created a release"
@@ -60,6 +58,7 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    environment: ${{ inputs.environment }}
     permissions: {}
     concurrency:
       group: release-please-${{ github.repository }}
@@ -73,8 +72,8 @@ jobs:
         id: app
         uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
         with:
-          app-id: ${{ inputs.app-id }}
-          private-key: ${{ secrets.release-app-private-key }}
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
           repositories: ${{ github.event.repository.name }}
           permission-contents: write
           permission-pull-requests: write
