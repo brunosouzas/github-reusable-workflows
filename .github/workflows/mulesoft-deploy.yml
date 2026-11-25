@@ -1,0 +1,283 @@
+name: mulesoft-deploy
+
+# Reusable workflow, called only by mulesoft-app.yml of this repository (same commit): publishes a
+# MuleSoft application's version to the organisation's Exchange, then deploys that version from Exchange
+# to one CloudHub 2.0 environment and checks it. Read mulesoft/README.md first.
+# - publish: builds the checked-out commit (a SNAPSHOT of main or release/*, or the tag) with
+#   -DskipMunitTests and publishes it; a version Exchange already has is not published again.
+# - deploy: mule:deploy of that version from Exchange (no build of the application: the deploy takes
+#   what Exchange holds), with the values of deployment/<environment>.yaml, then checks that the
+#   application is RUNNING that version and that its health path answers 200.
+# Both jobs declare the GitHub environment named after the stage (test, uat or prod), which holds its
+# secret; prod has Bruno as required reviewer, so its deploy waits for his approval.
+#
+# Departure from GHAD-3 (github-actions 1.0.0): the publish job builds in the job that holds the
+# Exchange credential, because the mule-maven-plugin publishes what it packages. It restores no cache
+# (GHAD-4) and runs only on main, release/* or a v* tag, refs that only reviewed pull requests or the
+# release app change.
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: The stage, test, uat or prod; the GitHub environment and deployment/<environment>.yaml
+        type: string
+        required: true
+      ref:
+        description: The ref to publish and deploy (the run's commit when empty)
+        type: string
+        default: ""
+      publish:
+        description: Publish the version to Exchange before the deploy
+        type: boolean
+        default: true
+      group-id:
+        description: The canonical groupId Git holds; the publication replaces it with the organisation's ID
+        type: string
+        default: com.brunosouzas.mulesoft
+      install-from-source:
+        description: Libraries built from their tag first, one "owner/repo pom-property" per line
+        type: string
+        default: ""
+      java-version:
+        description: The JDK the build runs on
+        type: string
+        default: "17"
+    secrets:
+      ANYPOINT_CLIENT_SECRET:
+        description: Pass it by name; it resolves from the stage's environment
+        required: false
+
+permissions: {}
+
+env:
+  MAVEN_VERSION: 3.9.11
+  MAVEN_SHA512: bcfe4fe305c962ace56ac7b5fc7a08b87d5abd8b7e89027ab251069faebee516b0ded8961445d6d91ec1985dfe30f8153268843c89aa392733d1a3ec956c9978
+
+jobs:
+  publish:
+    name: publish
+    if: inputs.publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    environment: ${{ inputs.environment }}
+    permissions:
+      contents: read
+    concurrency:
+      group: mulesoft-publish-${{ github.repository }}-${{ inputs.environment }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+      - uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
+        with:
+          distribution: temurin
+          java-version: ${{ inputs.java-version }}
+      - name: Maven ${{ env.MAVEN_VERSION }} and its settings
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/maven.tar.gz"
+          curl -fsSL --retry 3 -o "$archive" \
+            "https://archive.apache.org/dist/maven/maven-3/${MAVEN_VERSION}/binaries/apache-maven-${MAVEN_VERSION}-bin.tar.gz"
+          echo "${MAVEN_SHA512}  ${archive}" | sha512sum -c -
+          mkdir -p "$RUNNER_TEMP/maven"
+          tar -xzf "$archive" -C "$RUNNER_TEMP/maven" --strip-components=1
+          echo "$RUNNER_TEMP/maven/bin" >>"$GITHUB_PATH"
+          cat >"$RUNNER_TEMP/settings.xml" <<'XML'
+          <settings>
+            <servers>
+              <server>
+                <id>anypoint-exchange-v3</id>
+                <username>~~~Client~~~</username>
+                <password>${env.ANYPOINT_CLIENT_ID}~?~${env.ANYPOINT_CLIENT_SECRET}</password>
+              </server>
+            </servers>
+          </settings>
+          XML
+          echo "SETTINGS=$RUNNER_TEMP/settings.xml" >>"$GITHUB_ENV"
+      - name: Libraries from their tag
+        if: inputs.install-from-source != ''
+        env:
+          LIBRARIES: ${{ inputs.install-from-source }}
+        run: |
+          set -euo pipefail
+          while read -r repo property; do
+            [ -n "$repo" ] || continue
+            version="$(yq -p xml -oy ".project.properties.\"$property\"" pom.xml)"
+            [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::$property is '$version', not a released X.Y.Z"; exit 1; }
+            dir="$RUNNER_TEMP/src/${repo#*/}"
+            git clone -q --depth 1 --branch "v$version" "https://github.com/$repo.git" "$dir"
+            mvn -B -ntp -f "$dir/pom.xml" -DskipTests install
+            echo "Installed $repo v$version from source" >>"$GITHUB_STEP_SUMMARY"
+          done <<<"$LIBRARIES"
+      - name: Publish the version to Exchange
+        env:
+          GROUP_ID: ${{ inputs.group-id }}
+          ANYPOINT_ORG_ID: ${{ vars.ANYPOINT_ORG_ID }}
+          ANYPOINT_CLIENT_ID: ${{ vars.ANYPOINT_CLIENT_ID }}
+          ANYPOINT_CLIENT_SECRET: ${{ secrets.ANYPOINT_CLIENT_SECRET }}
+        run: |
+          set -euo pipefail
+          if [ -z "$ANYPOINT_ORG_ID" ] || [ -z "$ANYPOINT_CLIENT_ID" ] || [ -z "$ANYPOINT_CLIENT_SECRET" ]; then
+            echo "::error::ANYPOINT_ORG_ID, ANYPOINT_CLIENT_ID or ANYPOINT_CLIENT_SECRET is not set (mulesoft/README.md, Setup)"
+            exit 1
+          fi
+          asset="$(yq -p xml -oy '.project.artifactId' pom.xml)"
+          version="$(yq -p xml -oy '.project.version' pom.xml)"
+          if [[ "$version" != *-SNAPSHOT ]]; then
+            token="$(curl -fsS --max-time 60 https://anypoint.mulesoft.com/accounts/api/v2/oauth2/token \
+              --data-urlencode grant_type=client_credentials \
+              --data-urlencode "client_id=$ANYPOINT_CLIENT_ID" \
+              --data-urlencode "client_secret=$ANYPOINT_CLIENT_SECRET" | jq -er .access_token)"
+            echo "::add-mask::$token"
+            code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 60 -H "Authorization: Bearer $token" \
+              "https://anypoint.mulesoft.com/exchange/api/v2/assets/$ANYPOINT_ORG_ID/$asset/$version")"
+            if [ "$code" = 200 ]; then
+              echo "$asset $version is already on Exchange: nothing to publish" | tee -a "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+          fi
+          sed -i "0,/<groupId>$GROUP_ID<\/groupId>/s//<groupId>$ANYPOINT_ORG_ID<\/groupId>/" pom.xml
+          [ "$(yq -p xml -oy '.project.groupId' pom.xml)" = "$ANYPOINT_ORG_ID" ] ||
+            { echo "::error::the project's groupId is not the first $GROUP_ID of pom.xml"; exit 1; }
+          mvn -B -ntp -s "$SETTINGS" -DskipMunitTests deploy
+          echo "Published $asset $version to the organisation's Exchange" >>"$GITHUB_STEP_SUMMARY"
+
+  deploy:
+    name: deploy
+    needs: publish
+    if: always() && (needs.publish.result == 'success' || needs.publish.result == 'skipped')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    environment: ${{ inputs.environment }}
+    permissions:
+      contents: read
+    concurrency:
+      group: mulesoft-deploy-${{ github.repository }}-${{ inputs.environment }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+      - uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
+        with:
+          distribution: temurin
+          java-version: ${{ inputs.java-version }}
+      - name: Maven ${{ env.MAVEN_VERSION }} and its settings
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/maven.tar.gz"
+          curl -fsSL --retry 3 -o "$archive" \
+            "https://archive.apache.org/dist/maven/maven-3/${MAVEN_VERSION}/binaries/apache-maven-${MAVEN_VERSION}-bin.tar.gz"
+          echo "${MAVEN_SHA512}  ${archive}" | sha512sum -c -
+          mkdir -p "$RUNNER_TEMP/maven"
+          tar -xzf "$archive" -C "$RUNNER_TEMP/maven" --strip-components=1
+          echo "$RUNNER_TEMP/maven/bin" >>"$GITHUB_PATH"
+          cat >"$RUNNER_TEMP/settings.xml" <<'XML'
+          <settings>
+            <servers>
+              <server>
+                <id>anypoint-exchange-v3</id>
+                <username>~~~Client~~~</username>
+                <password>${env.ANYPOINT_CLIENT_ID}~?~${env.ANYPOINT_CLIENT_SECRET}</password>
+              </server>
+            </servers>
+          </settings>
+          XML
+          echo "SETTINGS=$RUNNER_TEMP/settings.xml" >>"$GITHUB_ENV"
+      # mule:deploy resolves the project's dependencies, so the libraries built from source are
+      # installed here too (their released tag, never code of the application).
+      - name: Libraries from their tag
+        if: inputs.install-from-source != ''
+        env:
+          LIBRARIES: ${{ inputs.install-from-source }}
+        run: |
+          set -euo pipefail
+          while read -r repo property; do
+            [ -n "$repo" ] || continue
+            version="$(yq -p xml -oy ".project.properties.\"$property\"" pom.xml)"
+            [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::$property is '$version', not a released X.Y.Z"; exit 1; }
+            dir="$RUNNER_TEMP/src/${repo#*/}"
+            git clone -q --depth 1 --branch "v$version" "https://github.com/$repo.git" "$dir"
+            mvn -B -ntp -f "$dir/pom.xml" -DskipTests install
+          done <<<"$LIBRARIES"
+      - name: Deploy the version from Exchange
+        id: deploy
+        env:
+          STAGE: ${{ inputs.environment }}
+          GROUP_ID: ${{ inputs.group-id }}
+          ANYPOINT_ENVIRONMENT: ${{ vars.ANYPOINT_ENVIRONMENT }}
+          ANYPOINT_ORG_ID: ${{ vars.ANYPOINT_ORG_ID }}
+          ANYPOINT_CLIENT_ID: ${{ vars.ANYPOINT_CLIENT_ID }}
+          ANYPOINT_CLIENT_SECRET: ${{ secrets.ANYPOINT_CLIENT_SECRET }}
+        run: |
+          set -euo pipefail
+          if [ -z "$ANYPOINT_ENVIRONMENT" ] || [ -z "$ANYPOINT_ORG_ID" ] || [ -z "$ANYPOINT_CLIENT_ID" ] || [ -z "$ANYPOINT_CLIENT_SECRET" ]; then
+            echo "::error::ANYPOINT_ENVIRONMENT, ANYPOINT_ORG_ID, ANYPOINT_CLIENT_ID or ANYPOINT_CLIENT_SECRET is not set for $STAGE (mulesoft/README.md, Setup)"
+            exit 1
+          fi
+          cfg="deployment/$STAGE.yaml"
+          [ -f "$cfg" ] || { echo "::error::$cfg is missing"; exit 1; }
+          value() { yq -r "$1 // \"\"" "$cfg"; }
+          for key in applicationName target runtimeVersion replicas vCores healthPath; do
+            [ -n "$(value ".$key")" ] || { echo "::error::$cfg has no $key"; exit 1; }
+          done
+          sed -i "0,/<groupId>$GROUP_ID<\/groupId>/s//<groupId>$ANYPOINT_ORG_ID<\/groupId>/" pom.xml
+          [ "$(yq -p xml -oy '.project.groupId' pom.xml)" = "$ANYPOINT_ORG_ID" ] ||
+            { echo "::error::the project's groupId is not the first $GROUP_ID of pom.xml"; exit 1; }
+          version="$(yq -p xml -oy '.project.version' pom.xml)"
+          echo "version=$version" >>"$GITHUB_OUTPUT"
+          # dummy.jar: mule:deploy takes the version Exchange holds and builds nothing.
+          mvn -B -ntp -s "$SETTINGS" mule:deploy -Dmule.artifact=dummy.jar -DmuleDeploy \
+            -Ddeploy.environment="$ANYPOINT_ENVIRONMENT" \
+            -Ddeploy.applicationName="$(value .applicationName)" \
+            -Ddeploy.target="$(value .target)" \
+            -Ddeploy.runtimeVersion="$(value .runtimeVersion)" \
+            -Ddeploy.replicas="$(value .replicas)" \
+            -Ddeploy.vCores="$(value .vCores)" \
+            -Ddeploy.clientId="$ANYPOINT_CLIENT_ID" \
+            -Ddeploy.clientSecret="$ANYPOINT_CLIENT_SECRET"
+      - name: Check the deploy (RUNNING the version, health 200)
+        env:
+          STAGE: ${{ inputs.environment }}
+          VERSION: ${{ steps.deploy.outputs.version }}
+          ANYPOINT_ENVIRONMENT: ${{ vars.ANYPOINT_ENVIRONMENT }}
+          ANYPOINT_ORG_ID: ${{ vars.ANYPOINT_ORG_ID }}
+          ANYPOINT_CLIENT_ID: ${{ vars.ANYPOINT_CLIENT_ID }}
+          ANYPOINT_CLIENT_SECRET: ${{ secrets.ANYPOINT_CLIENT_SECRET }}
+        run: |
+          set -euo pipefail
+          cfg="deployment/$STAGE.yaml"
+          name="$(yq -r .applicationName "$cfg")"
+          health="$(yq -r .healthPath "$cfg")"
+          token="$(curl -fsS --max-time 60 https://anypoint.mulesoft.com/accounts/api/v2/oauth2/token \
+            --data-urlencode grant_type=client_credentials \
+            --data-urlencode "client_id=$ANYPOINT_CLIENT_ID" \
+            --data-urlencode "client_secret=$ANYPOINT_CLIENT_SECRET" | jq -er .access_token)"
+          echo "::add-mask::$token"
+          get() { curl -fsS --max-time 60 -H "Authorization: Bearer $token" "https://anypoint.mulesoft.com/$1"; }
+          env_id="$(get "accounts/api/organizations/$ANYPOINT_ORG_ID/environments" |
+            jq -er --arg n "$ANYPOINT_ENVIRONMENT" '[.data[] | select(.name == $n)] | if length == 1 then .[0].id else error("no single environment " + $n) end')"
+          deployments="amc/application-manager/api/v2/organizations/$ANYPOINT_ORG_ID/environments/$env_id/deployments"
+          deadline=$(($(date +%s) + 600))
+          url=''
+          while :; do
+            id="$(get "$deployments" | jq -r --arg n "$name" '.items[]? | select(.name == $n) | .id' | head -n 1)" || id=''
+            if [ -n "$id" ]; then
+              detail="$(get "$deployments/$id")" || detail='{}'
+              status="$(jq -r '.application.status // ""' <<<"$detail")"
+              running="$(jq -r '.application.ref.version // ""' <<<"$detail")"
+              url="$(jq -r '.target.deploymentSettings.http.inbound.publicUrl // ""' <<<"$detail" | cut -d, -f1)"
+              if [ "$status" = RUNNING ] && [ "$running" = "$VERSION" ] && [ -n "$url" ] &&
+                [ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 "${url%/}$health")" = 200 ]; then
+                break
+              fi
+              echo "not yet: status '$status', version '$running'"
+            fi
+            [ "$(date +%s)" -lt "$deadline" ] || { echo "::error::$name is not RUNNING $VERSION with $health 200 within 10 minutes"; exit 1; }
+            sleep 15
+          done
+          echo "$name RUNNING $VERSION in $ANYPOINT_ENVIRONMENT; GET ${url%/}$health 200" | tee -a "$GITHUB_STEP_SUMMARY"

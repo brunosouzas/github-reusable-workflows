@@ -1,0 +1,242 @@
+name: mulesoft-library
+
+# Reusable workflow: the delivery of a MuleSoft library (a connector or module, `mule-extension`
+# packaging) in a public repository. Read mulesoft/README.md first. A library has no environment of
+# its own: merging a pull request into main is releasing it.
+# - pull_request into main: build and tests, no secret, Maven cache.
+# - push to main (the merge): the Maven release as the caller's release GitHub App
+#   (release:prepare: tag vX.Y.Z, main at X.Y.(Z+1)-SNAPSHOT, both commits [skip ci]), then the tag is
+#   published to the Anypoint organisation's Exchange and gets its GitHub release.
+# Git holds the canonical groupId (input group-id); only the checkout of the tag gets the organisation's
+# ID, because Exchange takes an asset only under its organisation. The POM declares the Exchange
+# publish goals in a profile named `exchange`, so `mvn install` works for anyone with no Anypoint
+# account.
+#
+# Caller (.github/workflows/delivery.yml of the library):
+#   on:
+#     pull_request:
+#       branches: [main]
+#     push:
+#       branches: [main]
+#   permissions: {}
+#   jobs:
+#     library:
+#       uses: brunosouzas/github-reusable-workflows/.github/workflows/mulesoft-library.yml@<sha> # vX.Y.Z
+#       permissions:
+#         contents: read
+#       secrets:
+#         ANYPOINT_CLIENT_SECRET: ${{ secrets.ANYPOINT_CLIENT_SECRET }}
+#         RELEASE_APP_PRIVATE_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+#
+# Needs in the caller: repository variables ANYPOINT_ORG_ID, ANYPOINT_CLIENT_ID (a Connected App with
+# Exchange Contributor) and RELEASE_APP_CLIENT_ID; the environment `release` (deployment branch main)
+# with the secrets ANYPOINT_CLIENT_SECRET and RELEASE_APP_PRIVATE_KEY; the release app installed on the
+# repository and in the bypass list of the main and v* tag rulesets (it pushes the Maven release's
+# commits and the tag). The secrets are passed by name and resolve from the environment of the job that
+# reads them, so a pull request (from a fork or not) never gets them.
+#
+# Departure from GHAD-3 (github-actions 1.0.0): release:prepare builds and tests the release in the job
+# that holds the release token, because the Maven release builds what it tags. The job restores no
+# cache (GHAD-4) and runs only on a commit of main that a reviewed pull request merged.
+
+on:
+  workflow_call:
+    inputs:
+      group-id:
+        description: The canonical groupId Git holds; the publication replaces it with the organisation's ID
+        type: string
+        default: com.brunosouzas.mulesoft
+      java-version:
+        description: The JDK the build runs on
+        type: string
+        default: "17"
+    secrets:
+      ANYPOINT_CLIENT_SECRET:
+        description: Pass it by name; it resolves from the environment release
+        required: false
+      RELEASE_APP_PRIVATE_KEY:
+        description: Pass it by name; it resolves from the environment release
+        required: false
+
+permissions: {}
+
+env:
+  # The hosted image's Maven is not pinned; mule-extensions-maven-plugin needs a 3.9 Maven.
+  MAVEN_VERSION: 3.9.11
+  MAVEN_SHA512: bcfe4fe305c962ace56ac7b5fc7a08b87d5abd8b7e89027ab251069faebee516b0ded8961445d6d91ec1985dfe30f8153268843c89aa392733d1a3ec956c9978
+
+jobs:
+  build:
+    name: build
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    concurrency:
+      group: mulesoft-library-pr-${{ github.repository }}-${{ github.ref }}
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
+        with:
+          distribution: temurin
+          java-version: ${{ inputs.java-version }}
+          cache: maven
+      - name: Maven ${{ env.MAVEN_VERSION }}
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/maven.tar.gz"
+          curl -fsSL --retry 3 -o "$archive" \
+            "https://archive.apache.org/dist/maven/maven-3/${MAVEN_VERSION}/binaries/apache-maven-${MAVEN_VERSION}-bin.tar.gz"
+          echo "${MAVEN_SHA512}  ${archive}" | sha512sum -c -
+          mkdir -p "$RUNNER_TEMP/maven"
+          tar -xzf "$archive" -C "$RUNNER_TEMP/maven" --strip-components=1
+          echo "$RUNNER_TEMP/maven/bin" >>"$GITHUB_PATH"
+      - name: Build and test
+        run: mvn -B -ntp verify
+
+  release:
+    name: release
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    environment: release
+    permissions:
+      contents: read
+    concurrency:
+      group: mulesoft-library-release-${{ github.repository }}
+      cancel-in-progress: false
+    steps:
+      - name: The repository and the environment hold what the release needs
+        env:
+          ORG_ID: ${{ vars.ANYPOINT_ORG_ID }}
+          CLIENT_ID: ${{ vars.ANYPOINT_CLIENT_ID }}
+          APP_CLIENT_ID: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          SECRET_SET: ${{ secrets.ANYPOINT_CLIENT_SECRET != '' }}
+          KEY_SET: ${{ secrets.RELEASE_APP_PRIVATE_KEY != '' }}
+        run: |
+          missing=''
+          [ -n "$ORG_ID" ] || missing="$missing ANYPOINT_ORG_ID"
+          [ -n "$CLIENT_ID" ] || missing="$missing ANYPOINT_CLIENT_ID"
+          [ -n "$APP_CLIENT_ID" ] || missing="$missing RELEASE_APP_CLIENT_ID"
+          [ "$SECRET_SET" = true ] || missing="$missing ANYPOINT_CLIENT_SECRET"
+          [ "$KEY_SET" = true ] || missing="$missing RELEASE_APP_PRIVATE_KEY"
+          [ -z "$missing" ] || { echo "::error::not set:$missing (mulesoft/README.md, Setup)"; exit 1; }
+      - name: Release app token for this repository only
+        id: app
+        uses: actions/create-github-app-token@f418cff399f7aef4c2f0ad47e25ca7a6abbdd6fc # v3.4.0
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
+        with:
+          distribution: temurin
+          java-version: ${{ inputs.java-version }}
+      - name: Maven ${{ env.MAVEN_VERSION }} and its settings
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/maven.tar.gz"
+          curl -fsSL --retry 3 -o "$archive" \
+            "https://archive.apache.org/dist/maven/maven-3/${MAVEN_VERSION}/binaries/apache-maven-${MAVEN_VERSION}-bin.tar.gz"
+          echo "${MAVEN_SHA512}  ${archive}" | sha512sum -c -
+          mkdir -p "$RUNNER_TEMP/maven"
+          tar -xzf "$archive" -C "$RUNNER_TEMP/maven" --strip-components=1
+          echo "$RUNNER_TEMP/maven/bin" >>"$GITHUB_PATH"
+          # No secret in the file: Maven reads both values from the environment of the step that runs it.
+          cat >"$RUNNER_TEMP/settings.xml" <<'XML'
+          <settings>
+            <servers>
+              <server>
+                <id>anypoint-exchange-v3</id>
+                <username>~~~Client~~~</username>
+                <password>${env.ANYPOINT_CLIENT_ID}~?~${env.ANYPOINT_CLIENT_SECRET}</password>
+              </server>
+            </servers>
+          </settings>
+          XML
+          echo "SETTINGS=$RUNNER_TEMP/settings.xml" >>"$GITHUB_ENV"
+      - name: Maven release (tag and next SNAPSHOT on main)
+        id: release
+        env:
+          GITHUB_TOKEN: ${{ steps.app.outputs.token }}
+          APP_SLUG: ${{ steps.app.outputs.app-slug }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          # Git authenticates with the app token in a header set through the environment: no file, no argv.
+          auth="$(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 -w0)"
+          echo "::add-mask::$auth"
+          export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader
+          export GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $auth" GIT_TERMINAL_PROMPT=0
+          bot_id="$(GH_TOKEN="$GITHUB_TOKEN" gh api "users/${APP_SLUG}%5Bbot%5D" --jq .id)"
+          git config user.name "${APP_SLUG}[bot]"
+          git config user.email "${bot_id}+${APP_SLUG}[bot]@users.noreply.github.com"
+
+          version="$(yq -p xml -oy '.project.version' pom.xml)"
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+-SNAPSHOT$ ]] || { echo "::error::main is at $version, not X.Y.Z-SNAPSHOT"; exit 1; }
+          tag="v${version%-SNAPSHOT}"
+          git checkout -q -B main
+          if git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null 2>&1; then
+            # A rerun after the push: the tag's commit is the release commit Maven made on this commit.
+            git fetch -q origin "+refs/tags/$tag:refs/tags/$tag"
+            [ "$(git rev-parse "$tag^{commit}^")" = "$SHA" ] || { echo "::error::$tag exists and was not made from this commit"; exit 1; }
+            echo "$tag was pushed by an earlier attempt of this job; resuming at its publication"
+          else
+            [ "$(git ls-remote --heads origin main | cut -f1)" = "$SHA" ] ||
+              { echo "::error::main moved after this run started; the next merge releases it"; exit 1; }
+            mvn -B -ntp -s "$SETTINGS" release:prepare -Darguments="-B -ntp"
+            git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null || { echo "::error::Maven finished and $tag is not on GitHub"; exit 1; }
+          fi
+          echo "tag=$tag" >>"$GITHUB_OUTPUT"
+          echo "Released $tag; main is at $(yq -p xml -oy '.project.version' pom.xml)" >>"$GITHUB_STEP_SUMMARY"
+      - name: Publish the tag to Exchange
+        env:
+          TAG: ${{ steps.release.outputs.tag }}
+          GROUP_ID: ${{ inputs.group-id }}
+          ANYPOINT_ORG_ID: ${{ vars.ANYPOINT_ORG_ID }}
+          ANYPOINT_CLIENT_ID: ${{ vars.ANYPOINT_CLIENT_ID }}
+          ANYPOINT_CLIENT_SECRET: ${{ secrets.ANYPOINT_CLIENT_SECRET }}
+        run: |
+          set -euo pipefail
+          git checkout -q "refs/tags/$TAG"
+          asset="$(yq -p xml -oy '.project.artifactId' pom.xml)"
+          token="$(curl -fsS --max-time 60 https://anypoint.mulesoft.com/accounts/api/v2/oauth2/token \
+            --data-urlencode grant_type=client_credentials \
+            --data-urlencode "client_id=$ANYPOINT_CLIENT_ID" \
+            --data-urlencode "client_secret=$ANYPOINT_CLIENT_SECRET" | jq -er .access_token)"
+          echo "::add-mask::$token"
+          code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 60 -H "Authorization: Bearer $token" \
+            "https://anypoint.mulesoft.com/exchange/api/v2/assets/$ANYPOINT_ORG_ID/$asset/${TAG#v}")"
+          if [ "$code" = 200 ]; then
+            echo "$asset ${TAG#v} is already on Exchange: nothing to publish"
+            exit 0
+          fi
+          grep -q "<groupId>$GROUP_ID</groupId>" pom.xml || { echo "::error::pom.xml does not hold the groupId $GROUP_ID"; exit 1; }
+          # The first groupId of the POM is the project's own; only this checkout changes.
+          sed -i "0,/<groupId>$GROUP_ID<\/groupId>/s//<groupId>$ANYPOINT_ORG_ID<\/groupId>/" pom.xml
+          [ "$(yq -p xml -oy '.project.groupId' pom.xml)" = "$ANYPOINT_ORG_ID" ] ||
+            { echo "::error::the project's groupId is not the first $GROUP_ID of pom.xml"; exit 1; }
+          mvn -B -ntp -s "$SETTINGS" -Pexchange -DskipTests deploy
+          echo "Published $asset ${TAG#v} to the organisation's Exchange" >>"$GITHUB_STEP_SUMMARY"
+      - name: GitHub release of the tag
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          TAG: ${{ steps.release.outputs.tag }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" -R "$REPO" >/dev/null 2>&1; then
+            echo "The release $TAG exists"
+          else
+            gh release create "$TAG" -R "$REPO" --verify-tag --title "$TAG" --generate-notes
+          fi
