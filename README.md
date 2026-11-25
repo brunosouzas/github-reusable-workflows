@@ -6,6 +6,11 @@ Reusable GitHub Actions workflows for Bruno's open source repositories, pinned b
 |---|---|---|---|
 | `.github/workflows/release-please.yml` | Delivery model 2: release-please in manifest mode keeps the release pull request; merging it makes the `vX.Y.Z` tag and the GitHub release. Runs as the caller's own release GitHub App (one app per repository: a pull request opened with `GITHUB_TOKEN` starts no checks, and when release-please makes the tag, the `v*` tag ruleset lets only the app create it), with a token limited to the caller's repository, in the caller's environment `release-please` | `environment` (`release-please`), `skip-github-release` (`false`; `true` when the caller's own release workflow creates the tag, as the npm packages do) | `RELEASE_APP_PRIVATE_KEY`, passed by name; it resolves from the environment `release-please`. `RELEASE_APP_CLIENT_ID` is read from the environment's variables |
 | `.github/workflows/pr-title.yml` | Fails a pull request whose title is not a Conventional Commit (`<type>[(<scope>)][!]: <description>`), since the squash merge makes the title the commit release-please reads. No third-party action | none | none |
+| `.github/workflows/mulesoft-library.yml` | A MuleSoft library (connector or module): the pull request builds; the merge is the Maven release, published to Exchange | `group-id`, `java-version` | `ANYPOINT_CLIENT_SECRET`, `RELEASE_APP_PRIVATE_KEY` |
+| `.github/workflows/mulesoft-app.yml` | A MuleSoft application: `main` to TEST, `release/X.Y.Z` to UAT, the tag to PROD after approval, and the back-merge | `action`, `version`, `pull-requests`, `base`, `group-id`, `install-from-source`, `java-version` | `ANYPOINT_CLIENT_SECRET`, `RELEASE_APP_PRIVATE_KEY` |
+| `.github/workflows/mulesoft-deploy.yml` | Called by `mulesoft-app.yml` only: publish to Exchange, deploy to CloudHub 2.0, check | `environment`, `ref`, `publish`, `group-id`, `install-from-source`, `java-version` | `ANYPOINT_CLIENT_SECRET` |
+
+The MuleSoft workflows, their branch strategy, why they run no MUnit and their setup are in [mulesoft/README.md](mulesoft/README.md).
 
 ## Use
 
