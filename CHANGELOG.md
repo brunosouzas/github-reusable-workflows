@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.1](https://github.com/brunosouzas/github-reusable-workflows/compare/v0.2.0...v0.2.1) (2026-11-25)
+
+
+### Bug Fixes
+
+* **mulesoft:** no release pull request when the release is identical to main ([1af1f9d](https://github.com/brunosouzas/github-reusable-workflows/commit/1af1f9d5b065f4999a797c72771489a92ac1cb1b))
+
 ## [0.2.0](https://github.com/brunosouzas/github-reusable-workflows/compare/v0.1.0...v0.2.0) (2026-11-25)
 
 
