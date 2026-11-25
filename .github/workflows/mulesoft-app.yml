@@ -320,9 +320,16 @@ jobs:
               --title "chore: main to $next_main ($release is open)" \
               --body "main moves to $next_main because $release is open, so main and the release never publish the same SNAPSHOT to Exchange. Merge it before the next merge into main."
           fi
-          gh pr create -R "$REPO" --base main --head "$release" --title "release: $VERSION" --body "$(printf \
-            'Release %s, cut from %s.\n\n## Pull requests in this release\n\n%s\n\nUAT tests this branch; a fix found in UAT is a pull request into %s. Do not merge this pull request: the Release run opens the back-merge into main, and the PROD run of v%s deletes %s, which closes it.' \
-            "$VERSION" "$start" "${list:-- none}" "$release" "$VERSION" "$release")"
+          # A release identical to main (the first release after a migration, with no pull requests) has
+          # nothing to compare, and GitHub opens no pull request without a commit: its dossier is then
+          # this run's summary.
+          if [ "$(git rev-list --count "origin/main..refs/heads/$release")" = 0 ]; then
+            echo "::notice::$release is identical to main, so it has no release pull request"
+          else
+            gh pr create -R "$REPO" --base main --head "$release" --title "release: $VERSION" --body "$(printf \
+              'Release %s, cut from %s.\n\n## Pull requests in this release\n\n%s\n\nUAT tests this branch; a fix found in UAT is a pull request into %s. Do not merge this pull request: the Release run opens the back-merge into main, and the PROD run of v%s deletes %s, which closes it.' \
+              "$VERSION" "$start" "${list:-- none}" "$release" "$VERSION" "$release")"
+          fi
           echo "Opened $release from $start" >>"$GITHUB_STEP_SUMMARY"
 
   release:
