@@ -120,8 +120,10 @@ jobs:
           ANYPOINT_CLIENT_SECRET: ${{ secrets.ANYPOINT_CLIENT_SECRET }}
         run: |
           set -euo pipefail
-          [ -n "$ANYPOINT_ORG_ID" ] && [ -n "$ANYPOINT_CLIENT_ID" ] && [ -n "$ANYPOINT_CLIENT_SECRET" ] ||
-            { echo "::error::ANYPOINT_ORG_ID, ANYPOINT_CLIENT_ID or ANYPOINT_CLIENT_SECRET is not set (mulesoft/README.md, Setup)"; exit 1; }
+          if [ -z "$ANYPOINT_ORG_ID" ] || [ -z "$ANYPOINT_CLIENT_ID" ] || [ -z "$ANYPOINT_CLIENT_SECRET" ]; then
+            echo "::error::ANYPOINT_ORG_ID, ANYPOINT_CLIENT_ID or ANYPOINT_CLIENT_SECRET is not set (mulesoft/README.md, Setup)"
+            exit 1
+          fi
           asset="$(yq -p xml -oy '.project.artifactId' pom.xml)"
           version="$(yq -p xml -oy '.project.version' pom.xml)"
           if [[ "$version" != *-SNAPSHOT ]]; then
@@ -213,8 +215,10 @@ jobs:
           ANYPOINT_CLIENT_SECRET: ${{ secrets.ANYPOINT_CLIENT_SECRET }}
         run: |
           set -euo pipefail
-          [ -n "$ANYPOINT_ENVIRONMENT" ] && [ -n "$ANYPOINT_ORG_ID" ] && [ -n "$ANYPOINT_CLIENT_ID" ] && [ -n "$ANYPOINT_CLIENT_SECRET" ] ||
-            { echo "::error::ANYPOINT_ENVIRONMENT, ANYPOINT_ORG_ID, ANYPOINT_CLIENT_ID or ANYPOINT_CLIENT_SECRET is not set for $STAGE (mulesoft/README.md, Setup)"; exit 1; }
+          if [ -z "$ANYPOINT_ENVIRONMENT" ] || [ -z "$ANYPOINT_ORG_ID" ] || [ -z "$ANYPOINT_CLIENT_ID" ] || [ -z "$ANYPOINT_CLIENT_SECRET" ]; then
+            echo "::error::ANYPOINT_ENVIRONMENT, ANYPOINT_ORG_ID, ANYPOINT_CLIENT_ID or ANYPOINT_CLIENT_SECRET is not set for $STAGE (mulesoft/README.md, Setup)"
+            exit 1
+          fi
           cfg="deployment/$STAGE.yaml"
           [ -f "$cfg" ] || { echo "::error::$cfg is missing"; exit 1; }
           value() { yq -r "$1 // \"\"" "$cfg"; }

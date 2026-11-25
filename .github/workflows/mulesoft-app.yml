@@ -265,19 +265,19 @@ jobs:
           fi
           if [ "$BASE" = latest-tag ]; then
             if [ -n "$latest" ]; then
-              base="$latest"
+              start="$latest"
             else
               [ -z "${PULL_REQUESTS//[ ,]/}" ] || fail "there is no v* tag: the first release is cut from main, with no pull requests"
-              base=origin/main
+              start=origin/main
             fi
           else
             # The first release after a migration: the older tags lack this pipeline, so the release
             # starts from the commit on main that brought it.
             [[ "$BASE" =~ ^[0-9a-f]{7,40}$ ]] || fail "the base '$BASE' is not latest-tag or a commit"
             git merge-base --is-ancestor "$BASE" origin/main || fail "the base $BASE is not a commit of main"
-            base="$(git rev-parse "$BASE")"
+            start="$(git rev-parse "$BASE")"
           fi
-          echo "$release starts from $base"
+          echo "$release starts from $start"
 
           # The chosen pull requests, merged into main, in the order they were merged.
           picks="$RUNNER_TEMP/picks.tsv"
@@ -289,7 +289,7 @@ jobs:
               >>"$picks" || fail "pull request #$n is not a pull request merged into main"
           done
           sort -o "$picks" "$picks"
-          git checkout -q -B "$release" "$base"
+          git checkout -q -B "$release" "$start"
           while IFS=$'\t' read -r _ n sha title; do
             echo "bringing #$n $title"
             if ! git cherry-pick -x "$sha" >/dev/null 2>&1; then
@@ -322,8 +322,8 @@ jobs:
           fi
           gh pr create -R "$REPO" --base main --head "$release" --title "release: $VERSION" --body "$(printf \
             'Release %s, cut from %s.\n\n## Pull requests in this release\n\n%s\n\nUAT tests this branch; a fix found in UAT is a pull request into %s. Do not merge this pull request: the Release run opens the back-merge into main, and the PROD run of v%s deletes %s, which closes it.' \
-            "$VERSION" "$base" "${list:-- none}" "$release" "$VERSION" "$release")"
-          echo "Opened $release from $base" >>"$GITHUB_STEP_SUMMARY"
+            "$VERSION" "$start" "${list:-- none}" "$release" "$VERSION" "$release")"
+          echo "Opened $release from $start" >>"$GITHUB_STEP_SUMMARY"
 
   release:
     name: Release
