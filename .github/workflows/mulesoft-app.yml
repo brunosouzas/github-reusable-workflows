@@ -1,0 +1,561 @@
+name: mulesoft-app
+
+# Reusable workflow: the whole path of a MuleSoft application (`mule-application` packaging, CloudHub 2.0)
+# in a public repository. Read mulesoft/README.md first. The ref and the action decide what runs:
+# - pull_request into main or release/*: build with -DskipMunitTests, no secret, Maven cache;
+# - push to main (a merge): the SNAPSHOT to Exchange, deploy and check in TEST;
+# - workflow_dispatch on main, action criar-release: release/X.Y.Z from the latest v* tag (or a base
+#   commit) with the squash commits of the chosen pull requests, the release pull request, and the pull
+#   request that moves main to the next minor;
+# - push to release/* (Criar release, or a UAT fix merged into it): its SNAPSHOT to Exchange, deploy and
+#   check in UAT;
+# - workflow_dispatch on release/X.Y.Z, action release: the Maven release as the release app (the tag
+#   vX.Y.Z, the release at X.Y.(Z+1)-SNAPSHOT), then the back-merge pull request into main;
+# - push of a v* tag (the release app pushed it): the tag to Exchange, deploy and check in UAT, then
+#   PROD after the approval of the environment prod, then the GitHub release and the deletion of the
+#   release/X.Y.Z that made the tag (which closes its release pull request);
+# - workflow_dispatch on a v* tag, action auto: PROD only, after the same approval (a rollback to an
+#   earlier tag, or a retry);
+# - workflow_dispatch on main or release/*, action auto: the deploy of that branch again.
+# The Maven release's development commit starts with [skip ci], so its push runs nothing; its release
+# commit (the tagged one) does not, so the tag's push starts the run that ends in PROD.
+#
+# Caller (.github/workflows/delivery.yml of the application):
+#   on:
+#     pull_request:
+#       branches: [main, "release/**"]
+#     push:
+#       branches: [main, "release/**"]
+#       tags: ["v*"]
+#     workflow_dispatch:
+#       inputs:
+#         action: {type: choice, options: [auto, criar-release, release], default: auto}
+#         version: {type: string, default: none}
+#         pull-requests: {type: string, default: none}
+#         base: {type: string, default: latest-tag}
+#   permissions: {}
+#   jobs:
+#     app:
+#       uses: brunosouzas/github-reusable-workflows/.github/workflows/mulesoft-app.yml@<sha> # vX.Y.Z
+#       permissions:
+#         contents: read
+#       with:
+#         action: ${{ inputs.action || 'auto' }}
+#         version: ${{ inputs.version || 'none' }}
+#         pull-requests: ${{ inputs.pull-requests || 'none' }}
+#         base: ${{ inputs.base || 'latest-tag' }}
+#       secrets:
+#         ANYPOINT_CLIENT_SECRET: ${{ secrets.ANYPOINT_CLIENT_SECRET }}
+#         RELEASE_APP_PRIVATE_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+#
+# Needs in the caller (mulesoft/README.md, Setup): repository variables ANYPOINT_ORG_ID,
+# ANYPOINT_CLIENT_ID and RELEASE_APP_CLIENT_ID; the environments test (main), uat (release/* and v*
+# tags), prod (v* tags, a required reviewer) and release (main, release/* and v* tags), each with the
+# variable ANYPOINT_ENVIRONMENT (not release) and the secret ANYPOINT_CLIENT_SECRET, and release also
+# with RELEASE_APP_PRIVATE_KEY; deployment/<stage>.yaml for test, uat and prod; the release app in the
+# bypass list of the release/* and v* tag rulesets.
+#
+# Departure from GHAD-3 (github-actions 1.0.0): the Maven release builds what it tags in the job that
+# holds the release token. The job restores no cache (GHAD-4) and runs only on a release/* branch,
+# which only Criar release and reviewed pull requests change.
+
+on:
+  workflow_call:
+    inputs:
+      action:
+        description: auto (the ref decides), criar-release (on main) or release (on release/*)
+        type: string
+        default: auto
+      version:
+        description: "Criar release: X.Y.Z, or none for main's version without -SNAPSHOT"
+        type: string
+        default: none
+      pull-requests:
+        description: "Criar release: the numbers of pull requests merged into main, or none"
+        type: string
+        default: none
+      base:
+        description: "Criar release: latest-tag, or a commit of main (the first release after a migration)"
+        type: string
+        default: latest-tag
+      group-id:
+        description: The canonical groupId Git holds; the publication replaces it with the organisation's ID
+        type: string
+        default: com.brunosouzas.mulesoft
+      install-from-source:
+        description: Libraries built from their tag first, one "owner/repo pom-property" per line
+        type: string
+        default: ""
+      java-version:
+        description: The JDK the build runs on
+        type: string
+        default: "17"
+    secrets:
+      ANYPOINT_CLIENT_SECRET:
+        description: Pass it by name; it resolves from each stage's environment
+        required: false
+      RELEASE_APP_PRIVATE_KEY:
+        description: Pass it by name; it resolves from the environment release
+        required: false
+
+permissions: {}
+
+env:
+  MAVEN_VERSION: 3.9.11
+  MAVEN_SHA512: bcfe4fe305c962ace56ac7b5fc7a08b87d5abd8b7e89027ab251069faebee516b0ded8961445d6d91ec1985dfe30f8153268843c89aa392733d1a3ec956c9978
+
+jobs:
+  build:
+    name: build
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    concurrency:
+      group: mulesoft-app-pr-${{ github.repository }}-${{ github.ref }}
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
+        with:
+          distribution: temurin
+          java-version: ${{ inputs.java-version }}
+          cache: maven
+      - name: Maven ${{ env.MAVEN_VERSION }}
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/maven.tar.gz"
+          curl -fsSL --retry 3 -o "$archive" \
+            "https://archive.apache.org/dist/maven/maven-3/${MAVEN_VERSION}/binaries/apache-maven-${MAVEN_VERSION}-bin.tar.gz"
+          echo "${MAVEN_SHA512}  ${archive}" | sha512sum -c -
+          mkdir -p "$RUNNER_TEMP/maven"
+          tar -xzf "$archive" -C "$RUNNER_TEMP/maven" --strip-components=1
+          echo "$RUNNER_TEMP/maven/bin" >>"$GITHUB_PATH"
+      - name: Libraries from their tag
+        if: inputs.install-from-source != ''
+        env:
+          LIBRARIES: ${{ inputs.install-from-source }}
+        run: |
+          set -euo pipefail
+          while read -r repo property; do
+            [ -n "$repo" ] || continue
+            version="$(yq -p xml -oy ".project.properties.\"$property\"" pom.xml)"
+            [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::$property is '$version', not a released X.Y.Z"; exit 1; }
+            dir="$RUNNER_TEMP/src/${repo#*/}"
+            git clone -q --depth 1 --branch "v$version" "https://github.com/$repo.git" "$dir"
+            mvn -B -ntp -f "$dir/pom.xml" -DskipTests install
+          done <<<"$LIBRARIES"
+      # MUnit needs the Mule EE runtime, which needs a MuleSoft customer credential that never goes to
+      # a public repository (mulesoft/README.md, "Why no MUnit"). MUnit runs on the developer's machine.
+      - name: Build (no MUnit)
+        run: mvn -B -ntp -DskipMunitTests verify
+
+  test:
+    name: TEST
+    if: >-
+      github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && inputs.action == 'auto'
+    uses: ./.github/workflows/mulesoft-deploy.yml
+    permissions:
+      contents: read
+    with:
+      environment: test
+      group-id: ${{ inputs.group-id }}
+      install-from-source: ${{ inputs.install-from-source }}
+      java-version: ${{ inputs.java-version }}
+    secrets:
+      ANYPOINT_CLIENT_SECRET: ${{ secrets.ANYPOINT_CLIENT_SECRET }}
+
+  uat:
+    name: UAT
+    if: >-
+      github.event_name != 'pull_request' && startsWith(github.ref, 'refs/heads/release/') && inputs.action == 'auto'
+    uses: ./.github/workflows/mulesoft-deploy.yml
+    permissions:
+      contents: read
+    with:
+      environment: uat
+      group-id: ${{ inputs.group-id }}
+      install-from-source: ${{ inputs.install-from-source }}
+      java-version: ${{ inputs.java-version }}
+    secrets:
+      ANYPOINT_CLIENT_SECRET: ${{ secrets.ANYPOINT_CLIENT_SECRET }}
+
+  create-release:
+    name: Criar release
+    if: >-
+      github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.action == 'criar-release'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment: release
+    permissions:
+      contents: read
+    concurrency:
+      group: mulesoft-release-${{ github.repository }}
+      cancel-in-progress: false
+    steps:
+      - name: Release app token for this repository only
+        id: app
+        uses: actions/create-github-app-token@f418cff399f7aef4c2f0ad47e25ca7a6abbdd6fc # v3.4.0
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+          permission-pull-requests: write
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+      - uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
+        with:
+          distribution: temurin
+          java-version: ${{ inputs.java-version }}
+      - name: Maven ${{ env.MAVEN_VERSION }}
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/maven.tar.gz"
+          curl -fsSL --retry 3 -o "$archive" \
+            "https://archive.apache.org/dist/maven/maven-3/${MAVEN_VERSION}/binaries/apache-maven-${MAVEN_VERSION}-bin.tar.gz"
+          echo "${MAVEN_SHA512}  ${archive}" | sha512sum -c -
+          mkdir -p "$RUNNER_TEMP/maven"
+          tar -xzf "$archive" -C "$RUNNER_TEMP/maven" --strip-components=1
+          echo "$RUNNER_TEMP/maven/bin" >>"$GITHUB_PATH"
+      - name: Criar release
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          APP_SLUG: ${{ steps.app.outputs.app-slug }}
+          REPO: ${{ github.repository }}
+          VERSION: ${{ inputs.version }}
+          PULL_REQUESTS: ${{ inputs.pull-requests }}
+          BASE: ${{ inputs.base }}
+        run: |
+          set -euo pipefail
+          fail() { echo "::error::$*"; exit 1; }
+          auth="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          echo "::add-mask::$auth"
+          export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader
+          export GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $auth" GIT_TERMINAL_PROMPT=0
+          bot_id="$(gh api "users/${APP_SLUG}%5Bbot%5D" --jq .id)"
+          git config user.name "${APP_SLUG}[bot]"
+          git config user.email "${bot_id}+${APP_SLUG}[bot]@users.noreply.github.com"
+          set_version() {
+            mvn -B -ntp -q org.codehaus.mojo:versions-maven-plugin:2.18.0:set -DnewVersion="$1" \
+              -DgenerateBackupPoms=false -DprocessParent=false
+          }
+
+          [ "$PULL_REQUESTS" != none ] || PULL_REQUESTS=''
+          git fetch -q origin "+refs/heads/main:refs/remotes/origin/main"
+          main_version="$(git show origin/main:pom.xml | yq -p xml -oy '.project.version')"
+          [ "$VERSION" != none ] || VERSION="${main_version%-SNAPSHOT}"
+          [[ "$VERSION" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]] || fail "the version '$VERSION' is not X.Y.Z"
+          next_main="${BASH_REMATCH[1]}.$((BASH_REMATCH[2] + 1)).0-SNAPSHOT"
+          release="release/$VERSION"
+          ! git ls-remote --exit-code --heads origin "$release" >/dev/null 2>&1 || fail "$release already exists"
+
+          latest="$(git tag -l 'v*' --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1 || true)"
+          if [ -n "$latest" ]; then
+            top="$(printf '%s\n%s\n' "${latest#v}" "$VERSION" | sort -V | tail -n 1)"
+            if [ "$top" != "$VERSION" ] || [ "${latest#v}" = "$VERSION" ]; then
+              fail "the version $VERSION is not above the latest tag $latest"
+            fi
+          fi
+          if [ "$BASE" = latest-tag ]; then
+            if [ -n "$latest" ]; then
+              base="$latest"
+            else
+              [ -z "${PULL_REQUESTS//[ ,]/}" ] || fail "there is no v* tag: the first release is cut from main, with no pull requests"
+              base=origin/main
+            fi
+          else
+            # The first release after a migration: the older tags lack this pipeline, so the release
+            # starts from the commit on main that brought it.
+            [[ "$BASE" =~ ^[0-9a-f]{7,40}$ ]] || fail "the base '$BASE' is not latest-tag or a commit"
+            git merge-base --is-ancestor "$BASE" origin/main || fail "the base $BASE is not a commit of main"
+            base="$(git rev-parse "$BASE")"
+          fi
+          echo "$release starts from $base"
+
+          # The chosen pull requests, merged into main, in the order they were merged.
+          picks="$RUNNER_TEMP/picks.tsv"
+          : >"$picks"
+          for n in ${PULL_REQUESTS//,/ }; do
+            [[ "$n" =~ ^[0-9]+$ ]] || fail "'$n' is not a pull request number"
+            gh api "repos/$REPO/pulls/$n" --jq \
+              'if .merged_at == null or .base.ref != "main" then error("not merged into main") else [.merged_at, (.number | tostring), .merge_commit_sha, .title] | @tsv end' \
+              >>"$picks" || fail "pull request #$n is not a pull request merged into main"
+          done
+          sort -o "$picks" "$picks"
+          git checkout -q -B "$release" "$base"
+          while IFS=$'\t' read -r _ n sha title; do
+            echo "bringing #$n $title"
+            if ! git cherry-pick -x "$sha" >/dev/null 2>&1; then
+              files="$(git diff --name-only --diff-filter=U | tr '\n' ' ')"
+              git cherry-pick --abort || true
+              fail "pull request #$n does not apply on $release (conflict in ${files:-unknown files}); nothing was pushed"
+            fi
+          done <"$picks"
+          if [ "$(yq -p xml -oy '.project.version' pom.xml)" != "$VERSION-SNAPSHOT" ]; then
+            set_version "$VERSION-SNAPSHOT"
+            git commit -q -am "chore(release): $release at $VERSION-SNAPSHOT"
+          fi
+
+          # main moves past the release unless it is above it already (a hotfix release).
+          bump_main=false
+          if [ "$(printf '%s\n%s\n' "${main_version%-SNAPSHOT}" "$VERSION" | sort -V | tail -n 1)" = "$VERSION" ]; then
+            git checkout -q -B "chore/main-$next_main" origin/main
+            set_version "$next_main"
+            git commit -q -am "chore: main to $next_main, $release is open"
+            bump_main=true
+          fi
+
+          git push -q origin "refs/heads/$release:refs/heads/$release"
+          list="$(while IFS=$'\t' read -r _ n _ title; do printf -- '- #%s %s\n' "$n" "$title"; done <"$picks")"
+          if [ "$bump_main" = true ]; then
+            git push -q origin "refs/heads/chore/main-$next_main:refs/heads/chore/main-$next_main"
+            gh pr create -R "$REPO" --base main --head "chore/main-$next_main" \
+              --title "chore: main to $next_main ($release is open)" \
+              --body "main moves to $next_main because $release is open, so main and the release never publish the same SNAPSHOT to Exchange. Merge it before the next merge into main."
+          fi
+          gh pr create -R "$REPO" --base main --head "$release" --title "release: $VERSION" --body "$(printf \
+            'Release %s, cut from %s.\n\n## Pull requests in this release\n\n%s\n\nUAT tests this branch; a fix found in UAT is a pull request into %s. Do not merge this pull request: the Release run opens the back-merge into main, and the PROD run of v%s deletes %s, which closes it.' \
+            "$VERSION" "$base" "${list:-- none}" "$release" "$VERSION" "$release")"
+          echo "Opened $release from $base" >>"$GITHUB_STEP_SUMMARY"
+
+  release:
+    name: Release
+    if: >-
+      github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/heads/release/') && inputs.action == 'release'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    environment: release
+    permissions:
+      contents: read
+    concurrency:
+      group: mulesoft-release-${{ github.repository }}
+      cancel-in-progress: false
+    steps:
+      - name: Release app token for this repository only
+        id: app
+        uses: actions/create-github-app-token@f418cff399f7aef4c2f0ad47e25ca7a6abbdd6fc # v3.4.0
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+          permission-pull-requests: write
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+      - uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
+        with:
+          distribution: temurin
+          java-version: ${{ inputs.java-version }}
+      - name: Maven ${{ env.MAVEN_VERSION }}
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/maven.tar.gz"
+          curl -fsSL --retry 3 -o "$archive" \
+            "https://archive.apache.org/dist/maven/maven-3/${MAVEN_VERSION}/binaries/apache-maven-${MAVEN_VERSION}-bin.tar.gz"
+          echo "${MAVEN_SHA512}  ${archive}" | sha512sum -c -
+          mkdir -p "$RUNNER_TEMP/maven"
+          tar -xzf "$archive" -C "$RUNNER_TEMP/maven" --strip-components=1
+          echo "$RUNNER_TEMP/maven/bin" >>"$GITHUB_PATH"
+      - name: Libraries from their tag
+        if: inputs.install-from-source != ''
+        env:
+          LIBRARIES: ${{ inputs.install-from-source }}
+        run: |
+          set -euo pipefail
+          while read -r repo property; do
+            [ -n "$repo" ] || continue
+            version="$(yq -p xml -oy ".project.properties.\"$property\"" pom.xml)"
+            [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::$property is '$version', not a released X.Y.Z"; exit 1; }
+            dir="$RUNNER_TEMP/src/${repo#*/}"
+            git clone -q --depth 1 --branch "v$version" "https://github.com/$repo.git" "$dir"
+            mvn -B -ntp -f "$dir/pom.xml" -DskipTests install
+          done <<<"$LIBRARIES"
+      - name: Maven release (the tag, and the release's next SNAPSHOT)
+        id: release
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          APP_SLUG: ${{ steps.app.outputs.app-slug }}
+          REF_NAME: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          fail() { echo "::error::$*"; exit 1; }
+          auth="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          echo "::add-mask::$auth"
+          export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader
+          export GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $auth" GIT_TERMINAL_PROMPT=0
+          bot_id="$(gh api "users/${APP_SLUG}%5Bbot%5D" --jq .id)"
+          git config user.name "${APP_SLUG}[bot]"
+          git config user.email "${bot_id}+${APP_SLUG}[bot]@users.noreply.github.com"
+
+          version="$(yq -p xml -oy '.project.version' pom.xml)"
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+-SNAPSHOT$ ]] || fail "$REF_NAME is at $version, not X.Y.Z-SNAPSHOT"
+          tag="v${version%-SNAPSHOT}"
+          git checkout -q -B "$REF_NAME"
+          if git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null 2>&1; then
+            git fetch -q origin "+refs/tags/$tag:refs/tags/$tag"
+            [ "$(git rev-parse "$tag^{commit}^")" = "$SHA" ] || fail "$tag exists and was not made from this commit"
+            echo "$tag was pushed by an earlier attempt of this job; going on to the back-merge"
+          else
+            [ "$(git ls-remote --heads origin "$REF_NAME" | cut -f1)" = "$SHA" ] || fail "$REF_NAME moved after this run started; run Release again"
+            mvn -B -ntp release:prepare -Darguments="-B -ntp -DskipMunitTests"
+            git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null || fail "Maven finished and $tag is not on GitHub"
+          fi
+          echo "tag=$tag" >>"$GITHUB_OUTPUT"
+          echo "Released $tag: its push deploys it to UAT, then to PROD after approval" >>"$GITHUB_STEP_SUMMARY"
+      - name: Back-merge pull request into main
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          APP_SLUG: ${{ steps.app.outputs.app-slug }}
+          REPO: ${{ github.repository }}
+          REF_NAME: ${{ github.ref_name }}
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          auth="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          echo "::add-mask::$auth"
+          export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader
+          export GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $auth" GIT_TERMINAL_PROMPT=0
+          release="$REF_NAME"
+          branch="back-merge/$TAG"
+          release_pr="$(gh pr list -R "$REPO" --base main --head "$release" --state open --json number --jq '.[0].number // empty')"
+          note() { [ -z "$release_pr" ] || gh pr comment "$release_pr" -R "$REPO" --body "$1"; }
+          left() { echo "::warning::the back-merge of $TAG was not opened: $1. Make it by hand: cherry-pick the fixes onto a branch from main"; exit 0; }
+
+          if [ -n "$(gh pr list -R "$REPO" --base main --head "$branch" --state open --json number --jq '.[0].number // empty')" ]; then
+            echo "The back-merge of $TAG is open already"
+            exit 0
+          fi
+          # The fixes: pull requests merged into the release whose commit is in the tag, by merge time.
+          git fetch -q origin "+refs/heads/main:refs/remotes/origin/main"
+          picks="$RUNNER_TEMP/fixes.tsv"
+          gh api "repos/$REPO/pulls?state=closed&base=$release&per_page=100" --jq \
+            '.[] | select(.merged_at != null) | [.merged_at, (.number | tostring), .merge_commit_sha, .title] | @tsv' |
+            sort >"$picks.all"
+          : >"$picks"
+          while IFS=$'\t' read -r merged n sha title; do
+            if git merge-base --is-ancestor "$sha" "$TAG" 2>/dev/null; then
+              printf '%s\t%s\t%s\t%s\n' "$merged" "$n" "$sha" "$title" >>"$picks"
+            fi
+          done <"$picks.all"
+          if [ ! -s "$picks" ]; then
+            note "$TAG was released with no fix merged into $release, so there is no back-merge. The PROD run of $TAG deletes $release, which closes this pull request."
+            exit 0
+          fi
+          git checkout -q -B "$branch" origin/main
+          while IFS=$'\t' read -r _ n sha title; do
+            git cherry-pick -x "$sha" >/dev/null 2>&1 && continue
+            if [ -z "$(git diff --name-only --diff-filter=U)" ] && git diff --cached --quiet; then
+              git cherry-pick --skip >/dev/null 2>&1
+              echo "main already has #$n"
+              continue
+            fi
+            files="$(git diff --name-only --diff-filter=U | tr '\n' ' ')"
+            git cherry-pick --abort || true
+            left "pull request #$n does not apply on main (conflict in ${files:-unknown files})"
+          done <"$picks"
+          if [ "$(git rev-list --count origin/main..HEAD)" = 0 ]; then
+            note "$TAG was released and main has every fix of $release, so there is no back-merge. The PROD run of $TAG deletes $release, which closes this pull request."
+            exit 0
+          fi
+          # GitHub skips the run of a push or pull request whose commit message holds one of these.
+          if git log --format=%B origin/main..HEAD | grep -qiE '\[(skip ci|ci skip|no ci|skip actions|actions skip)\]|skip-checks: ?true'; then
+            left "a fix's message holds a marker that skips CI, so the back-merge's checks would not run"
+          fi
+          git push -q origin "refs/heads/$branch:refs/heads/$branch"
+          list="$(while IFS=$'\t' read -r _ n _ title; do printf -- '- #%s %s\n' "$n" "$title"; done <"$picks")"
+          url="$(gh pr create -R "$REPO" --base main --head "$branch" --title "chore: back-merge of $release after $TAG" \
+            --body "$(printf 'The fixes of %s, released in %s, back on main, which keeps its version:\n\n%s' "$release" "$TAG" "$list")")"
+          gh pr comment "$url" -R "$REPO" --body "Merge this after $TAG is in PROD, squashed, with its title and description as the commit message."
+          note "$TAG was released. The back-merge is $url. The PROD run of $TAG deletes $release, which closes this pull request."
+          echo "Back-merge: $url" >>"$GITHUB_STEP_SUMMARY"
+
+  uat-tag:
+    name: UAT (the tag)
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    uses: ./.github/workflows/mulesoft-deploy.yml
+    permissions:
+      contents: read
+    with:
+      environment: uat
+      group-id: ${{ inputs.group-id }}
+      install-from-source: ${{ inputs.install-from-source }}
+      java-version: ${{ inputs.java-version }}
+    secrets:
+      ANYPOINT_CLIENT_SECRET: ${{ secrets.ANYPOINT_CLIENT_SECRET }}
+
+  prod:
+    name: PROD
+    needs: uat-tag
+    # After the tag's UAT deploy, or alone when a v* tag is run by hand (a rollback or a retry). The
+    # environment prod admits only v* tags and waits for its required reviewer.
+    if: >-
+      always() && startsWith(github.ref, 'refs/tags/v') && inputs.action == 'auto' &&
+      (needs.uat-tag.result == 'success' || (github.event_name == 'workflow_dispatch' && needs.uat-tag.result == 'skipped'))
+    uses: ./.github/workflows/mulesoft-deploy.yml
+    permissions:
+      contents: read
+    with:
+      environment: prod
+      publish: false
+      group-id: ${{ inputs.group-id }}
+      install-from-source: ${{ inputs.install-from-source }}
+      java-version: ${{ inputs.java-version }}
+    secrets:
+      ANYPOINT_CLIENT_SECRET: ${{ secrets.ANYPOINT_CLIENT_SECRET }}
+
+  close-release:
+    name: Close the release
+    needs: prod
+    if: always() && needs.prod.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment: release
+    permissions:
+      contents: read
+    steps:
+      - name: Release app token for this repository only
+        id: app
+        uses: actions/create-github-app-token@f418cff399f7aef4c2f0ad47e25ca7a6abbdd6fc # v3.4.0
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+      - name: GitHub release, and the release branch deleted
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" -R "$REPO" >/dev/null 2>&1; then
+            echo "The release $TAG exists"
+          else
+            gh release create "$TAG" -R "$REPO" --verify-tag --title "$TAG" --generate-notes
+          fi
+          # The branch that made the tag holds it with only the Maven release's next-iteration commit
+          # after it. A release that went on after the tag stays, and a rollback finds nothing to delete.
+          tag_commit="$(git rev-parse "refs/tags/$TAG^{commit}")"
+          git ls-remote --heads origin 'release/*' | while read -r sha ref; do
+            git fetch -q origin "$ref"
+            if [ "$(git rev-parse "$sha^" 2>/dev/null)" = "$tag_commit" ]; then
+              gh api -X DELETE "repos/$REPO/git/refs/${ref#refs/}"
+              echo "Deleted ${ref#refs/heads/}, which closes its release pull request" | tee -a "$GITHUB_STEP_SUMMARY"
+            fi
+          done
