@@ -64,6 +64,12 @@ env:
   # The hosted image's Maven is not pinned; mule-extensions-maven-plugin needs a 3.9 Maven.
   MAVEN_VERSION: 3.9.11
   MAVEN_SHA512: bcfe4fe305c962ace56ac7b5fc7a08b87d5abd8b7e89027ab251069faebee516b0ded8961445d6d91ec1985dfe30f8153268843c89aa392733d1a3ec956c9978
+  # Every mvn reads these (Maven 3.9 MAVEN_ARGS): a slow or silent repository fails a request in
+  # minutes and is retried, instead of holding the job until its timeout.
+  MAVEN_ARGS: >-
+    -Daether.connector.connectTimeout=30000
+    -Daether.connector.requestTimeout=120000
+    -Daether.connector.http.retryHandler.count=5
 
 jobs:
   build:
