@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.0](https://github.com/brunosouzas/github-reusable-workflows/compare/v0.1.0...v0.2.0) (2026-11-25)
+
+
+### Features
+
+* **mulesoft:** reusable workflows for MuleSoft libraries and applications ([3b5802a](https://github.com/brunosouzas/github-reusable-workflows/commit/3b5802a627fdf2eed172507f1048489da71e866b))
+
 ## 0.1.0 (2026-11-09)
 
 
