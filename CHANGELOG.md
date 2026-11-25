@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.2](https://github.com/brunosouzas/github-reusable-workflows/compare/v0.2.1...v0.2.2) (2026-11-25)
+
+
+### Bug Fixes
+
+* **mulesoft:** Maven network timeouts and retries ([0e653af](https://github.com/brunosouzas/github-reusable-workflows/commit/0e653af3a25b3b519612da31aeeb2d268a6e4919))
+
 ## [0.2.1](https://github.com/brunosouzas/github-reusable-workflows/compare/v0.2.0...v0.2.1) (2026-11-25)
 
 
