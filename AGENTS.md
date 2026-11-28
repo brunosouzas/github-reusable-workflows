@@ -18,7 +18,7 @@ Article: none
 
 ## Rules for this repository
 
-- Board area: `setup` (Azure Boards, project `brunosouzas`).
+- Tracker: Linear brunosouzas, team SW, label `setup`.
 - OpenSpec: no: every change takes the small path.
 - Every action is pinned by commit SHA with its tag in a comment; every tool by version and checksum.
 - Public repository: never a credential, never a private repository name or path that is not already public.
